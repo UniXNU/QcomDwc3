@@ -19,8 +19,8 @@ In host mode the device stack asks for no power. The xHCI subclass keeps the con
 - `qcom_dwc3_bring_up()`, `qcom_dwc3_publish()`: called by the board's USB probe.
 - `qcom_dwc3_vbus(int)`: the charger's online value.
 - `qcom_ucsi_start()`, `qcom_ucsi_receive()`, `qcom_ucsi_tick()`, `qcom_ucsi_polling()`: UCSI over the charger's GLINK channel.
-- Boot argument `sheng-usb`: 1 runs the driver, 2 adds register sampling, 3 also takes the controller off the bus and back once.
-- Boot arguments `sheng-usb-host=<s>` and `sheng-usb-back=<s>`: force host mode after a delay, then return to the cable's role.
+- Boot argument `usb`: 1 runs the driver, 2 adds register sampling, 3 also takes the controller off the bus and back once.
+- Boot arguments `usb-host=<s>` and `usb-back=<s>`: force host mode after a delay, then return to the cable's role.
 - `native_usb_stats`: the `[usb]` rows of the boot log (`log-sys=1`).
 
 ## Coherence
