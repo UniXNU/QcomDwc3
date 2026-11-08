@@ -26,7 +26,7 @@ bool sm8550_gcc_update32(volatile uint32_t *, uint32_t, uint32_t);
 // [5] GDSC USB30, [6] GDSC PHY, [7] SMMU slot | bank << 16, [8] repeater status, [9] RPMh rails found, [10] VBUS override state,
 // [11] interrupts, [12] powerOn calls, [13] powerOff calls, [14] controllerReset result, [15] DSTS at power on, [16] DCFG after
 // reset, [17] GCTL after reset, [18] GUSB2PHYCFG after reset, [19] start result, [20] power state request result, [21] kext load result,
-// with sheng-usb=2, every 2 s: [22] GSBUSCFG0, [23] GSBUSCFG1, [24] GUCTL1, [25] SMMU global fault, [26] DSTS, [27] DALEPENA,
+// with usb=2, every 2 s: [22] GSBUSCFG0, [23] GSBUSCFG1, [24] GUCTL1, [25] SMMU global fault, [26] DSTS, [27] DALEPENA,
 // [28] GEVNTCOUNT, [29] DEPCMD of EP0 OUT, [30] bypass bank fault status, [31] GEVNTSIZ.
 // [32] retimer: chip id | stage << 16, [33] QMP PCS status, [34] orientation GPIO, [35] VBUS changes | last value << 16,
 // [44] role applied | wanted << 8 | core << 16, [45] role changes, [46] xHCI load << 16 | start, [47] USBCMD, [48] USBSTS, [49] [50] PORTSC 1 and 2,
@@ -639,9 +639,9 @@ void forceHostThread(void *seconds, wait_result_t) {
     IOSleep((uint32_t)reinterpret_cast<uintptr_t>(seconds) * 1000);
     gForceHost = true;
     cableChanged();
-    // sheng-usb-back=<seconds in the host role>: then what the cable says, for an unattended run of the way back.
+    // usb-back=<seconds in the host role>: then what the cable says, for an unattended run of the way back.
     unsigned back = 0;
-    if (PE_parse_boot_argn("sheng-usb-back", &back, sizeof back) && back) {
+    if (PE_parse_boot_argn("usb-back", &back, sizeof back) && back) {
         IOSleep(back * 1000);
         gForceHost = false;
         cableChanged();
@@ -809,8 +809,8 @@ extern "C" bool qcom_ucsi_polling(void) {return gUcsi.polling != 0;}
 // The hardware, before the classes exist: a failure leaves the system running with USB off.
 extern "C" bool qcom_dwc3_bring_up(void) {return bringUp();}
 // After the module's metaclasses are registered: publish the provider and start the controller.
-// For bring-up (sheng-usb=2): what the core and the SMMU see while the system stack runs, sampled about every 5 ms for the link state.
-// cycle (sheng-usb=3) also takes the controller off the bus and back once, the path a cable removal runs, for an unattended host check.
+// For bring-up (usb=2): what the core and the SMMU see while the system stack runs, sampled about every 5 ms for the link state.
+// cycle (usb=3) also takes the controller off the bus and back once, the path a cable removal runs, for an unattended host check.
 extern "C" void qcom_dwc3_diag(bool cycle) {
     Region window = {};
     if (!mapRegion(window, kAppleWindow, 0x1000) || !gSmmu.va) return;
@@ -862,10 +862,10 @@ extern "C" void qcom_dwc3_publish(void) {
         gActiveNub = nub;
         // The core stays in the device role until a role asks otherwise: the controller's reset set it.
         thread_t thread = nullptr;
-        // sheng-usb-host=<seconds>: the host role that long after this point, whatever is on the cable, to bring the controller up with nothing
+        // usb-host=<seconds>: the host role that long after this point, whatever is on the cable, to bring the controller up with nothing
         // plugged in and to run the change of role.
         unsigned forced = 0;
-        PE_parse_boot_argn("sheng-usb-host", &forced, sizeof forced);
+        PE_parse_boot_argn("usb-host", &forced, sizeof forced);
         gRoleLock = IOLockAlloc();
         if (!gRoleLock || !mapRegion(gGlobals, kAppleWindow, 0x1000) || !mapRegion(gXhciRegs, kCore, 0x1000) ||
             kernel_thread_start(roleThread, nullptr, &thread) != KERN_SUCCESS) {stage(-17); break;}
