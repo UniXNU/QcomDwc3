@@ -806,6 +806,12 @@ extern "C" uint32_t qcom_ucsi_tick(uint8_t *out) {
     return n;
 }
 extern "C" bool qcom_ucsi_polling(void) {return gUcsi.polling != 0;}
+extern "C" uint32_t qcom_ucsi_request_data_host(uint8_t *out) {
+    const uint32_t bytes = ucsi_request_data_host(&gUcsi, out);
+    ucsiStats();
+    return bytes;
+}
+extern "C" int qcom_ucsi_data_host(void) {return ucsi_data_host(&gUcsi);}
 // The hardware, before the classes exist: a failure leaves the system running with USB off.
 extern "C" bool qcom_dwc3_bring_up(void) {return bringUp();}
 // After the module's metaclasses are registered: publish the provider and start the controller.

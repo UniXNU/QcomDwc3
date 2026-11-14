@@ -4,12 +4,16 @@
 #include <stdio.h>
 #include <vector>
 struct Ppm {
-    uint32_t buffer, cci = 0, status; uint64_t last = 0; std::vector<uint64_t> log; bool enabled = false; uint32_t pending = 0;
+    uint32_t buffer, cci = 0, status; uint64_t last = 0; std::vector<uint64_t> log; bool enabled = false, rejectRole = false; uint32_t pending = 0;
     void write(uint64_t c) {
         last = c; log.push_back(c);
         if (c == kUcsiReset) {cci = kUcsiCciResetComplete; pending = 0;}
         else if ((c & 0xff) == 0x05) {cci = kUcsiCciCommandComplete; enabled = c != kUcsiClearReset;}
         else if ((c & 0xff) == 0x12) cci = kUcsiCciCommandComplete;
+        else if (c == kUcsiDataHost) {
+            cci = rejectRole ? kUcsiCciError : kUcsiCciCommandComplete;
+            if (!rejectRole) status = (status & ~(7u << 29)) | (uint32_t)kUcsiPartnerUfp << 29;
+        }
         else if ((c & 0xff) == 0x04) {cci = kUcsiCciAckComplete; if (c & 1ull << 16) pending = 0;}
         cci |= pending;
     }
@@ -78,5 +82,16 @@ int main() {
      p.cci = 0; ucsi_receive(&u, in, p.readAnswer(in), out); assert(u.polling);
      for (unsigned i = 0; i < kUcsiPollsPerCommand + 2 && u.state != kUcsiFailed; ++i) {u.polling = 1; ucsi_tick(&u, out);}
      assert(u.state == kUcsiFailed);}
+    // MiPPS changes the data role while the sink's PD operating mode stays selected.
+    for (bool rejected : {false, true}) {
+        Ppm p; p.buffer = 48; p.rejectRole = rejected;
+        p.status = 1u << 19 | 3u << 16 | (uint32_t)kUcsiPartnerDfp << 29;
+        QcomUcsi u; uint8_t out[QCOM_UCSI_MAX_MESSAGE];
+        run(u, p, ucsi_start(&u, out), out);
+        run(u, p, ucsi_request_data_host(&u, out), out);
+        assert(u.state == kUcsiReady && ((u.status >> 16) & 7) == 3);
+        assert(rejected ? ucsi_data_host(&u) < 0 : ucsi_data_host(&u) == 1);
+        assert(ucsi_request_data_host(&u, out) == 0);
+    }
     puts("PASS");
 }
