@@ -25,10 +25,10 @@ enum {kUcsiPartnerDfp = 1, kUcsiPartnerUfp = 2, kUcsiPartnerCableUfp = 4};
 enum {kUcsiPollMs = 20, kUcsiPollsPerCommand = 250};   /* UCSI_TIMEOUT_MS is 10 s in Linux; 5 s here, as its GLINK wait */
 struct QcomUcsi {
     int state;
-    uint32_t buffer_bytes, version, cci, status, polls, polling, changes, errors;
+    uint32_t buffer_bytes, version, cci, status, polls, polling, changes, errors, connection_generation;
     int change_pending, change_read;   /* a connector change seen; its status was read and the change waits for its acknowledge */
     int connected, partner, usb, status_valid;   /* the last GET_CONNECTOR_STATUS */
-    int data_host_requested, data_host_error;
+    int data_host_requested, data_host_error, connect_change_latched;
 };
 static inline void ucsi_put32(uint8_t *p, uint32_t v) {p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);}
 static inline uint32_t ucsi_get32(const uint8_t *p) {return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;}
@@ -83,8 +83,15 @@ static inline uint32_t ucsi_advance(struct QcomUcsi *u, uint8_t *out, const uint
         if (cci & kUcsiCciCommandComplete) {
             /* UCSI_CONSTAT: connected bit 19, partner flag USB bit 21, partner type bits 31:29. */
             const uint32_t status = ucsi_get32(buffer + kUcsiOffMessageIn);
+            const int connected = (status >> 19) & 1;
+            const int connect_change = (status >> 14) & 1;
+            if (!u->status_valid || connected != u->connected || (connect_change && !u->connect_change_latched)) {
+                u->connection_generation++;
+                u->data_host_requested = u->data_host_error = 0;
+            }
+            if (connect_change) u->connect_change_latched = 1;
             u->status = status;
-            u->connected = (status >> 19) & 1;
+            u->connected = connected;
             u->usb = (status >> 21) & 1;
             u->partner = (int)(status >> 29);
             u->status_valid = 1;
@@ -103,6 +110,7 @@ static inline uint32_t ucsi_advance(struct QcomUcsi *u, uint8_t *out, const uint
         break;
     case kUcsiAckChangeSent:
         if (cci & kUcsiCciAckComplete) {
+            u->connect_change_latched = 0;
             if (u->change_pending) {u->change_pending = 0; u->change_read = 1; return ucsi_command(u, kUcsiAskStatus, out, kUcsiStatus);}
             u->state = kUcsiReady; u->polling = 0;
             return 0;

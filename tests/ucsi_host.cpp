@@ -14,7 +14,7 @@ struct Ppm {
             cci = rejectRole ? kUcsiCciError : kUcsiCciCommandComplete;
             if (!rejectRole) status = (status & ~(7u << 29)) | (uint32_t)kUcsiPartnerUfp << 29;
         }
-        else if ((c & 0xff) == 0x04) {cci = kUcsiCciAckComplete; if (c & 1ull << 16) pending = 0;}
+        else if ((c & 0xff) == 0x04) {cci = kUcsiCciAckComplete; if (c & 1ull << 16) {pending = 0; status &= ~(1u << 14);}}
         cci |= pending;
     }
     uint32_t readAnswer(uint8_t *m) {
@@ -92,6 +92,20 @@ int main() {
         assert(u.state == kUcsiReady && ((u.status >> 16) & 7) == 3);
         assert(rejected ? ucsi_data_host(&u) < 0 : ucsi_data_host(&u) == 1);
         assert(ucsi_request_data_host(&u, out) == 0);
+    }
+    // A disconnect/reconnect can leave the final status connected. Count its
+    // connect-change indication once across the status and acknowledge reads.
+    {
+        Ppm p; p.buffer = 48; p.status = 1u << 19 | 3u << 16 | (uint32_t)kUcsiPartnerUfp << 29;
+        QcomUcsi u; uint8_t out[QCOM_UCSI_MAX_MESSAGE], indication[12] = {};
+        run(u, p, ucsi_start(&u, out), out);
+        const uint32_t before = u.connection_generation;
+        p.pending = 1u << 1; p.status |= 1u << 14;
+        ucsi_put32(indication, QCOM_UCSI_OWNER); ucsi_put32(indication + 4, 2); ucsi_put32(indication + 8, kUcsiOpNotify);
+        run(u, p, ucsi_receive(&u, indication, sizeof indication, out), out);
+        assert(u.connected && u.connection_generation == before + 1);
+        run(u, p, ucsi_read_request(out), out);
+        assert(u.connection_generation == before + 1);
     }
     puts("PASS");
 }
