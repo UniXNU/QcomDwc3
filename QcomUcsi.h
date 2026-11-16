@@ -15,17 +15,20 @@ enum : uint32_t {kUcsiCciResetComplete = 1u << 27, kUcsiCciBusy = 1u << 28, kUcs
                  kUcsiCciCommandComplete = 1u << 31};
 /* ucsi.h: PPM_RESET, ACK_CC_CI, SET_NOTIFICATION_ENABLE with UCSI_ENABLE_NTFY_ALL, GET_CONNECTOR_STATUS of connector 1. */
 static const uint64_t kUcsiReset = 0x01, kUcsiClearReset = 0x05, kUcsiEnableAll = 0x05ull | 0xdbe70000ull,
-                      kUcsiStatus = 0x12ull | 1ull << 16, kUcsiAckCommand = 0x04ull | 1ull << 17, kUcsiAckChange = 0x04ull | 1ull << 16;
+                      kUcsiStatus = 0x12ull | 1ull << 16, kUcsiAckCommand = 0x04ull | 1ull << 17, kUcsiAckChange = 0x04ull | 1ull << 16,
+                      kUcsiDataHost = 0x09ull | 1ull << 16 | 1ull << 23 | 1ull << 25;
 enum QcomUcsiState {
-    kUcsiIdleOff, kUcsiFirstRead, kUcsiClearing, kUcsiResetting, kUcsiEnabling, kUcsiAckEnable, kUcsiAskStatus, kUcsiAckStatus, kUcsiAckChangeSent, kUcsiReady, kUcsiFailed
+    kUcsiIdleOff, kUcsiFirstRead, kUcsiClearing, kUcsiResetting, kUcsiEnabling, kUcsiAckEnable, kUcsiAskStatus, kUcsiAckStatus, kUcsiAckChangeSent, kUcsiReady,
+    kUcsiSetDataHost, kUcsiAckDataHost, kUcsiFailed
 };
 enum {kUcsiPartnerDfp = 1, kUcsiPartnerUfp = 2, kUcsiPartnerCableUfp = 4};
 enum {kUcsiPollMs = 20, kUcsiPollsPerCommand = 250};   /* UCSI_TIMEOUT_MS is 10 s in Linux; 5 s here, as its GLINK wait */
 struct QcomUcsi {
     int state;
-    uint32_t buffer_bytes, version, cci, status, polls, polling, changes, errors;
+    uint32_t buffer_bytes, version, cci, status, polls, polling, changes, errors, connection_generation;
     int change_pending, change_read;   /* a connector change seen; its status was read and the change waits for its acknowledge */
     int connected, partner, usb, status_valid;   /* the last GET_CONNECTOR_STATUS */
+    int data_host_requested, data_host_error, connect_change_latched;
 };
 static inline void ucsi_put32(uint8_t *p, uint32_t v) {p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);}
 static inline uint32_t ucsi_get32(const uint8_t *p) {return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;}
@@ -80,11 +83,19 @@ static inline uint32_t ucsi_advance(struct QcomUcsi *u, uint8_t *out, const uint
         if (cci & kUcsiCciCommandComplete) {
             /* UCSI_CONSTAT: connected bit 19, partner flag USB bit 21, partner type bits 31:29. */
             const uint32_t status = ucsi_get32(buffer + kUcsiOffMessageIn);
+            const int connected = (status >> 19) & 1;
+            const int connect_change = (status >> 14) & 1;
+            if (!u->status_valid || connected != u->connected || (connect_change && !u->connect_change_latched)) {
+                u->connection_generation++;
+                u->data_host_requested = u->data_host_error = 0;
+            }
+            if (connect_change) u->connect_change_latched = 1;
             u->status = status;
-            u->connected = (status >> 19) & 1;
+            u->connected = connected;
             u->usb = (status >> 21) & 1;
             u->partner = (int)(status >> 29);
             u->status_valid = 1;
+            if (!u->connected) {u->data_host_requested = 0; u->data_host_error = 0;}
             return ucsi_command(u, kUcsiAckStatus, out, kUcsiAckCommand);
         }
         break;
@@ -99,6 +110,7 @@ static inline uint32_t ucsi_advance(struct QcomUcsi *u, uint8_t *out, const uint
         break;
     case kUcsiAckChangeSent:
         if (cci & kUcsiCciAckComplete) {
+            u->connect_change_latched = 0;
             if (u->change_pending) {u->change_pending = 0; u->change_read = 1; return ucsi_command(u, kUcsiAskStatus, out, kUcsiStatus);}
             u->state = kUcsiReady; u->polling = 0;
             return 0;
@@ -107,6 +119,15 @@ static inline uint32_t ucsi_advance(struct QcomUcsi *u, uint8_t *out, const uint
     case kUcsiReady:
         if (u->change_pending) {u->change_pending = 0; u->change_read = 1; return ucsi_command(u, kUcsiAskStatus, out, kUcsiStatus);}
         return 0;
+    case kUcsiSetDataHost:
+        if (cci & (kUcsiCciCommandComplete | kUcsiCciError)) {
+            if (cci & kUcsiCciError) {u->errors++; u->data_host_error = 1;}
+            return ucsi_command(u, kUcsiAckDataHost, out, kUcsiAckCommand);
+        }
+        break;
+    case kUcsiAckDataHost:
+        if (cci & kUcsiCciAckComplete) return ucsi_command(u, kUcsiAskStatus, out, kUcsiStatus);
+        break;
     default:
         return 0;
     }
@@ -131,5 +152,20 @@ static inline uint32_t ucsi_tick(struct QcomUcsi *u, uint8_t *out) {
     if (++u->polls > kUcsiPollsPerCommand) {u->state = kUcsiFailed; u->polling = 0; return 0;}
     u->polling = 0;
     return ucsi_read_request(out);
+}
+/* MiPPS authentication uses the host data role. SET_UOR leaves the power role
+ * and the firmware's PD/PPS contract unchanged. The caller must identify a
+ * compatible charger before requesting this transition. */
+static inline uint32_t ucsi_request_data_host(struct QcomUcsi *u, uint8_t *out) {
+    if (u->state != kUcsiReady || !u->connected || u->data_host_requested || u->data_host_error ||
+        ((u->status >> 16) & 7) != 3 || u->partner != kUcsiPartnerDfp) return 0;
+    u->data_host_requested = 1;
+    return ucsi_command(u, kUcsiSetDataHost, out, kUcsiDataHost);
+}
+static inline int ucsi_data_host(const struct QcomUcsi *u) {
+    if (u->state == kUcsiFailed || u->data_host_error) return -95;
+    if (!u->status_valid || u->state != kUcsiReady) return 0;
+    if (!u->connected) return -107;
+    return u->partner == kUcsiPartnerUfp ? 1 : 0;
 }
 #endif
